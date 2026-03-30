@@ -1,6 +1,7 @@
 package com.sdk.glassessdksample.ui.wifi.p2p
 
 import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
@@ -15,6 +16,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 class WifiP2pManagerSingleton private constructor(private val context: Context) {
     
     companion object {
+        private const val TAG = "WifiP2pManagerSingleton"
+
         @Volatile
         private var instance: WifiP2pManagerSingleton? = null
         
@@ -39,7 +42,7 @@ class WifiP2pManagerSingleton private constructor(private val context: Context) 
     private val intentFilter = IntentFilter().apply {
         addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
         addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
-        addAction(WifiP2pManager.WIFI_P2P_CONNECTION_STATE_CHANGE_ACTION)
+        addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
         addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
     }
     
@@ -100,13 +103,13 @@ class WifiP2pManagerSingleton private constructor(private val context: Context) 
     
     fun connectToDevice(device: WifiP2pDevice) {
         if (connecting) {
-            Log.d(TAG, "P2P正在连接,不调用连接返回")
+            Log.d(TAG, "P2P is already connecting, skipping")
             callbacks.forEach { it.connecting() }
             return
         }
         
         if (connected) {
-            Log.d(TAG, "P2P已经连接上了，直接返回")
+            Log.d(TAG, "P2P already connected")
             return
         }
         
@@ -117,7 +120,7 @@ class WifiP2pManagerSingleton private constructor(private val context: Context) 
         }
         
         connecting = true
-        Log.d(TAG, "已经在连接设备: ${device.deviceName}")
+        Log.d(TAG, "Connecting to device: ${device.deviceName}")
         
         wifiP2pManager.connect(wifiP2pChannel, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
@@ -153,7 +156,6 @@ class WifiP2pManagerSingleton private constructor(private val context: Context) 
     }
     
     fun resetDeviceP2p() {
-        // Simplified for sample app - just log the action
         Log.d(TAG, "resetDeviceP2p called")
     }
     
@@ -231,7 +233,6 @@ class WifiP2pManagerSingleton private constructor(private val context: Context) 
         }
     }
     
-    // Internal methods for handling P2P events
     internal fun onWifiP2pEnabled() {
         callbacks.forEach { it.onWifiP2pEnabled() }
     }
@@ -260,12 +261,11 @@ class WifiP2pManagerSingleton private constructor(private val context: Context) 
         callbacks.forEach { it.onDisconnected() }
     }
     
-    // Timeout handlers
     private val discoveryTimeOut = object : Runnable {
         override fun run() {
-            Log.d(TAG, "内部扫描重试连接: $discoveryRetry")
+            Log.d(TAG, "Peer discovery retry: $discoveryRetry")
             if (discoveryRetry < 1) {
-                Log.d(TAG, "内部扫描重试连接一次")
+                Log.d(TAG, "Retrying peer discovery")
                 resetDeviceP2p()
                 initP2P()
                 startPeerDiscovery()
@@ -279,12 +279,12 @@ class WifiP2pManagerSingleton private constructor(private val context: Context) 
             connecting = false
             if (connectRetry < 1) {
                 wifiP2pDevice?.let { device ->
-                    Log.d(TAG, "内部连接重试连接一次")
+                    Log.d(TAG, "Retry connect to device: ${device.deviceName}")
                     connectToDevice(device)
                 }
                 connectRetry++
             } else {
-                Log.d(TAG, "不重连，等外部超时")
+                Log.d(TAG, "Connection retry limit reached")
                 callbacks.forEach { it.retryAlsoFailed() }
             }
         }
@@ -306,8 +306,4 @@ class WifiP2pManagerSingleton private constructor(private val context: Context) 
         fun cancelConnectFail(reason: Int)
         fun retryAlsoFailed()
     }
-    
-    companion object {
-        private const val TAG = "WifiP2pManagerSingleton"
-    }
-} 
+}

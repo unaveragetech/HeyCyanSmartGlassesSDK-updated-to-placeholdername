@@ -1,5 +1,6 @@
 package com.sdk.glassessdksample.ui
 import android.content.Context
+import android.os.Build
 import androidx.fragment.app.FragmentActivity
 import com.hjq.permissions.OnPermissionCallback
 import com.hjq.permissions.Permission
@@ -8,9 +9,6 @@ import com.hjq.permissions.XXPermissions
 /**
  * @author hzy ,
  * @date  2020/12/22
- * <p>
- * "程序应该是写给其他人读的,
- * 让机器来运行它只是一个附带功能"
  **/
 fun requestCallPhonePermission(
     activity: FragmentActivity,
@@ -40,9 +38,7 @@ fun hasCallPhonePermission(
 fun hasCameraPermission(
     context: Context,
 ): Boolean {
-    val permissions = mutableListOf<String>()
-    permissions.add(Permission.CAMERA)
-    return XXPermissions.isGranted(context, permissions)
+    return XXPermissions.isGranted(context, Permission.CAMERA)
 }
 
 fun hasSMSPermission(
@@ -77,9 +73,14 @@ fun hasCallPermission(activity: FragmentActivity): Boolean {
 
 fun hasBluetooth(activity: FragmentActivity): Boolean {
     val permissions = mutableListOf<String>()
-    permissions.add(Permission.BLUETOOTH_SCAN)
-    permissions.add(Permission.BLUETOOTH_CONNECT)
-    permissions.add(Permission.BLUETOOTH_ADVERTISE)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        permissions.add(Permission.BLUETOOTH_SCAN)
+        permissions.add(Permission.BLUETOOTH_CONNECT)
+        permissions.add(Permission.BLUETOOTH_ADVERTISE)
+    } else {
+        permissions.add(Permission.BLUETOOTH_SCAN) // XXPermissions handles legacy mapping
+        permissions.add(Permission.ACCESS_FINE_LOCATION)
+    }
     return XXPermissions.isGranted(activity, permissions)
 }
 
@@ -108,12 +109,15 @@ fun requestBluetoothPermission(
     activity: FragmentActivity,
     requestCallback: OnPermissionCallback
 ) {
-    XXPermissions.with(activity)
-        .permission(Permission.BLUETOOTH_SCAN)
-        .permission(Permission.BLUETOOTH_CONNECT)
-        .permission(Permission.BLUETOOTH_ADVERTISE)
-        .permission(Permission.ACCESS_FINE_LOCATION)
-        .request(requestCallback)
+    val request = XXPermissions.with(activity)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        request.permission(Permission.BLUETOOTH_SCAN)
+        request.permission(Permission.BLUETOOTH_CONNECT)
+        request.permission(Permission.BLUETOOTH_ADVERTISE)
+    }
+    // Always request location for scanning as a fallback/requirement for BLE on many versions
+    request.permission(Permission.ACCESS_FINE_LOCATION)
+    request.request(requestCallback)
 }
 
 fun requestCallPermission(
@@ -169,11 +173,30 @@ fun requestAllPermission(
     activity: FragmentActivity,
     callback: OnPermissionCallback
 ) {
-    XXPermissions.with(activity)
-//        .permission(Permission.WRITE_EXTERNAL_STORAGE)
-//        .permission(Permission.READ_EXTERNAL_STORAGE)
-        .permission(Permission.MANAGE_EXTERNAL_STORAGE)
-        .request(callback)
+    val request = XXPermissions.with(activity)
+    
+    // Bluetooth & Location
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        request.permission(Permission.BLUETOOTH_SCAN)
+        request.permission(Permission.BLUETOOTH_CONNECT)
+        request.permission(Permission.BLUETOOTH_ADVERTISE)
+    }
+    request.permission(Permission.ACCESS_FINE_LOCATION)
+    
+    // Storage
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        request.permission(Permission.MANAGE_EXTERNAL_STORAGE)
+    } else {
+        request.permission(Permission.READ_EXTERNAL_STORAGE)
+        request.permission(Permission.WRITE_EXTERNAL_STORAGE)
+    }
+
+    // Nearby Wi-Fi (Required for the P2P transfer feature on Pixel 6/Android 13+)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        request.permission(Permission.NEARBY_WIFI_DEVICES)
+    }
+    
+    request.request(callback)
 }
 
 

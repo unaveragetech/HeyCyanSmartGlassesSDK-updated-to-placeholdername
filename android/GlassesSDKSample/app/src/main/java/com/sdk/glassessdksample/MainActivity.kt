@@ -3,14 +3,23 @@ package com.sdk.glassessdksample
 import android.Manifest
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.widget.Toast
 import android.os.Bundle
+import android.os.Handler
+import android.provider.MediaStore
 import android.util.Log
+import android.view.View
 import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
+import androidx.lifecycle.lifecycleScope
 import androidx.core.app.ActivityCompat
+import com.google.android.material.tabs.TabLayoutMediator
 import com.hjq.permissions.OnPermissionCallback
 import com.hjq.permissions.XXPermissions
 import com.oudmon.ble.base.bluetooth.BleOperateManager
@@ -21,6 +30,7 @@ import com.oudmon.ble.base.communication.bigData.resp.GlassesDeviceNotifyRsp
 import com.sdk.glassessdksample.databinding.AcitivytMainBinding
 import com.sdk.glassessdksample.ui.BluetoothUtils
 import com.sdk.glassessdksample.ui.DeviceBindActivity
+import com.sdk.glassessdksample.ui.MainPagerAdapter
 import com.sdk.glassessdksample.ui.hasBluetooth
 import com.sdk.glassessdksample.ui.requestAllPermission
 import com.sdk.glassessdksample.ui.requestBluetoothPermission
@@ -28,6 +38,11 @@ import com.sdk.glassessdksample.ui.requestLocationPermission
 import com.sdk.glassessdksample.ui.requestNearbyWifiDevicesPermission
 import com.sdk.glassessdksample.ui.setOnClickListener
 import com.sdk.glassessdksample.ui.startKtxActivity
+import com.sdk.glassessdksample.feature.ConnectionManager
+import com.sdk.glassessdksample.feature.CustomFeatureApi
+import com.sdk.glassessdksample.feature.DeviceCommandService
+import com.sdk.glassessdksample.feature.TinyLLMService
+import com.sdk.glassessdksample.feature.VoiceCommandService
 import com.sdk.glassessdksample.ui.P2PController
 import com.sdk.glassessdksample.ui.wifi.p2p.WifiP2pManagerSingleton
 import android.net.wifi.p2p.WifiP2pDevice
@@ -47,11 +62,89 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: AcitivytMainBinding
     private val deviceNotifyListener by lazy { MyDeviceNotifyListener() }
 
+    private val bleIpBridge = com.sdk.glassessdksample.ui.BleIpBridge()
+    private var voiceCommandService: VoiceCommandService? = null
+    private val PREFS_NAME = "glasses_state"
+    private val PREF_KEY_DEVICE_IP = "device_ip"
+    private lateinit var sharedPreferences: android.content.SharedPreferences
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Auto theme by local hour
+        setThemeByTime()
+
         binding = AcitivytMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        initView()
+
+        // Mark this build clearly for verification
+        binding.toolbar.title = "HeyCyan Glasses v2026"
+        Toast.makeText(this, "Running updated demo build (v2026)", Toast.LENGTH_LONG).show()
+
+        // Splash / loading screen setup
+        binding.loadingContainer.visibility = View.VISIBLE
+        binding.mainContent.visibility = View.GONE
+
+        sharedPreferences = getSharedPreferences("app_prefs", MODE_PRIVATE)
+
+        // Observe IP from BLE bridge and persist for WiFi data download
+        lifecycleScope.launchWhenStarted {
+            bleIpBridge.ip.collect { ip ->
+                if (!ip.isNullOrBlank()) {
+                    Log.i("MainActivity", "BLE reported glasses IP: $ip")
+                    saveDeviceIpCache(ip)
+                }
+            }
+        }
+
+        if (!sharedPreferences.getBoolean("terms_accepted", false)) {
+            showFirstRunDisclaimer()
+        } else {
+            beginAppFlow()
+        }
+    }
+
+    private fun showFirstRunDisclaimer() {
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Prototype Disclaimer")
+            .setMessage("This is a prototype. We provide no liability for any results. By continuing, you agree to use experimental features at your own risk. This app is for testing and demonstration.")
+            .setCancelable(false)
+            .setPositiveButton("Accept") { _, _ ->
+                sharedPreferences.edit().putBoolean("terms_accepted", true).apply()
+                beginAppFlow()
+            }
+            .setNegativeButton("Exit") { _, _ -> finish() }
+            .create()
+        dialog.show()
+    }
+
+    private fun beginAppFlow() {
+        binding.loadingContainer.visibility = View.VISIBLE
+        binding.mainContent.visibility = View.GONE
+
+        binding.mainContent.postDelayed({
+            binding.loadingContainer.visibility = View.GONE
+            binding.mainContent.visibility = View.VISIBLE
+            showWelcomeTour()
+        }, 1200)
+    }
+
+    private fun showWelcomeTour() {
+        val didTour = sharedPreferences.getBoolean("tour_completed", false)
+        if (didTour) {
+            setupMainTabs(); return
+        }
+
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Welcome to the Glasses Assistant")
+            .setMessage("This app helps you connect to your glasses, run smart workflows, and customize your assistant. If Bluetooth pairing fails, you can continue in offline mode and use local features.")
+            .setCancelable(false)
+            .setPositiveButton("Continue") { _, _ ->
+                sharedPreferences.edit().putBoolean("tour_completed", true).apply()
+                setupMainTabs()
+            }
+            .create()
+        dialog.show()
     }
     inner class PermissionCallback : OnPermissionCallback {
         override fun onGranted(permissions: MutableList<String>, all: Boolean) {
@@ -97,6 +190,11 @@ class MainActivity : AppCompatActivity() {
         requestAllPermission(this, OnPermissionCallback { permissions, all ->  })
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        voiceCommandService?.release()
+    }
+
     inner class BluetoothPermissionCallback : OnPermissionCallback {
         override fun onGranted(permissions: MutableList<String>, all: Boolean) {
             if (!all) {
@@ -113,282 +211,18 @@ class MainActivity : AppCompatActivity() {
 
     }
 
-    private fun initView() {
-        setOnClickListener(
-            binding.btnScan,
-            binding.btnConnect,
-            binding.btnDisconnect,
-            binding.btnAddListener,
-            binding.btnSetTime,
-            binding.btnVersion,
-            binding.btnCamera,
-            binding.btnVideo,
-            binding.btnRecord,
-            binding.btnThumbnail,
-            binding.btnBt,
-            binding.btnBattery,
-            binding.btnVolume,
-            binding.btnMediaCount,
-            binding.btnDataDownload
-        ) {
-            when (this) {
-                binding.btnScan -> {
-                    requestLocationPermission(this@MainActivity, PermissionCallback())
-                }
-
-                binding.btnConnect -> {
-                    BleOperateManager.getInstance()
-                        .connectDirectly(DeviceManager.getInstance().deviceAddress)
-                }
-
-                binding.btnDisconnect -> {
-                    BleOperateManager.getInstance().unBindDevice()
-                }
-
-                binding.btnAddListener -> {
-                    LargeDataHandler.getInstance().addOutDeviceListener(100, deviceNotifyListener)
-                }
-
-                binding.btnSetTime -> {
-                    Log.i("setTime", "setTime"+BleOperateManager.getInstance().isConnected)
-                    LargeDataHandler.getInstance().syncTime { _, _ -> }
-                }
-
-                binding.btnVersion -> {
-                    LargeDataHandler.getInstance().syncDeviceInfo { _, response ->
-                        if (response != null) {
-                            //wifi 固件版本
-                             response.wifiFirmwareVersion
-                            //wifi 产品版本
-                            response.wifiHardwareVersion
-                            //蓝牙产品版本
-                             response.hardwareVersion
-                            //蓝牙固件版本
-                             response.firmwareVersion
-                        }
-                    }
-                }
-
-                binding.btnCamera -> {
-                    LargeDataHandler.getInstance().glassesControl(
-                        byteArrayOf(0x02, 0x01, 0x01)
-                    ) { _, it ->
-                        if (it.dataType == 1 && it.errorCode == 0) {
-                            when (it.workTypeIng) {
-                                2 -> {
-                                    //眼镜正在录像
-                                }
-                                4 -> {
-                                    //眼镜正在传输模式
-                                }
-                                5 -> {
-                                    //眼镜正在OTA模式
-                                }
-                                1, 6 ->{
-                                    //眼镜正在拍照模式
-                                }
-                                7 -> {
-                                    //眼镜正在AI对话
-                                }
-                                8 ->{
-                                    //眼镜正在录音模式
-                                }
-                            }
-                        } else {
-                            //执行开始和结束
-                        }
-                    }
-                }
-
-                binding.btnVideo -> {
-                    //videoStart  true 开始录制   false 停止录制
-                    val videoStart=true
-                    val value = if (videoStart) 0x02 else 0x03
-                    LargeDataHandler.getInstance().glassesControl(
-                        byteArrayOf(0x02, 0x01, value.toByte())
-                    ) { _, it ->
-                        if (it.dataType == 1) {
-                            if (it.errorCode == 0) {
-                                when (it.workTypeIng) {
-                                    2 -> {
-                                        //眼镜正在录像
-                                    }
-                                    4 -> {
-                                        //眼镜正在传输模式
-                                    }
-                                    5 -> {
-                                        //眼镜正在OTA模式
-                                    }
-                                    1, 6 ->{
-                                        //眼镜正在拍照模式
-                                    }
-                                    7 -> {
-                                        //眼镜正在AI对话
-                                    }
-                                    8 ->{
-                                        //眼镜正在录音模式
-                                    }
-                                }
-                            } else {
-                                //执行开始和结束
-                            }
-                        }
-                    }
-                }
-
-                binding.btnRecord -> {
-                    //recordStart  true 开始录制   false 停止录制
-                    val recordStart=true
-                    val value = if (recordStart) 0x08 else 0x0c
-                    LargeDataHandler.getInstance().glassesControl(
-                        byteArrayOf(0x02, 0x01, value.toByte())
-                    ) { _, it ->
-                        if (it.dataType == 1) {
-                            if (it.errorCode == 0) {
-                                when (it.workTypeIng) {
-                                    2 -> {
-                                        //眼镜正在录像
-                                    }
-                                    4 -> {
-                                        //眼镜正在传输模式
-                                    }
-                                    5 -> {
-                                        //眼镜正在OTA模式
-                                    }
-                                    1, 6 ->{
-                                        //眼镜正在拍照模式
-                                    }
-                                    7 -> {
-                                        //眼镜正在AI对话
-                                    }
-                                    8 ->{
-                                        //眼镜正在录音模式
-                                    }
-                                }
-                            } else {
-                                //执行开始和结束
-                            }
-                        }
-                    }
-                }
-
-                binding.btnThumbnail -> {
-                    //thumbnailSize  0..6
-                    val thumbnailSize=0x02
-                    LargeDataHandler.getInstance().glassesControl(
-                        byteArrayOf(
-                            0x02,
-                            0x01,
-                            0x06,
-                            thumbnailSize.toByte(),
-                            thumbnailSize.toByte(),
-                            0x02
-                        )
-                    ) { _, it ->
-                        if (it.dataType == 1) {
-                            if (it.errorCode == 0) {
-                                when (it.workTypeIng) {
-                                    2 -> {
-                                        //眼镜正在录像
-                                    }
-                                    4 -> {
-                                        //眼镜正在传输模式
-                                    }
-                                    5 -> {
-                                        //眼镜正在OTA模式
-                                    }
-                                    1, 6 ->{
-                                        //眼镜正在拍照模式
-                                    }
-                                    7 -> {
-                                        //眼镜正在AI对话
-                                    }
-                                    8 ->{
-                                        //眼镜正在录音模式
-                                    }
-                                }
-                            } else {
-                                //触发AI拍照，上报缩略图会收到上报指令
-                            }
-                        }
-                    }
-                }
-
-                binding.btnBt -> {
-                    //BT扫描
-                    BleOperateManager.getInstance().classicBluetoothStartScan()
-
-                }
-                binding.btnBattery -> {
-                    //添加电量监听
-                    LargeDataHandler.getInstance().addBatteryCallBack("init") { _, response ->
-
-                    }
-                    //电量
-                    LargeDataHandler.getInstance().syncBattery()
-                }
-                binding.btnVolume ->{
-                    //读取音量控制
-                    LargeDataHandler.getInstance().getVolumeControl { _, response ->
-                        if (response != null) {
-                            //眼镜音量 音乐最小值 最大值 当前值
-                            response.minVolumeMusic
-                            response.maxVolumeMusic
-                            response.currVolumeMusic
-                            //眼镜电话 电话最小值 最大值 当前值
-                            response.minVolumeCall
-                            response.maxVolumeCall
-                            response.currVolumeCall
-                            //眼镜系统 系统最小值 最大值 当前值
-                            response.minVolumeSystem
-                            response.maxVolumeSystem
-                            response.currVolumeSystem
-                            //眼镜当前的模式
-                            response.currVolumeType
-                        }
-                    }
-                }
-                binding.btnMediaCount ->{
-                    LargeDataHandler.getInstance().glassesControl(byteArrayOf(0x02, 0x04)) { _, it ->
-                        if (it.dataType == 4) {
-                            val mediaCount = it.imageCount + it.videoCount + it.recordCount
-                            if (mediaCount > 0) {
-                                //眼镜有多少个媒体没有上传
-                            } else {
-                                //无
-                            }
-                        }
-                    }
-                }
-                binding.btnDataDownload -> {
-                    // 检查并请求必要的权限
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        // Android 13+ 需要 NEARBY_WIFI_DEVICES 权限
-                        requestNearbyWifiDevicesPermission(this@MainActivity, object : OnPermissionCallback {
-                            override fun onGranted(permissions: MutableList<String>, all: Boolean) {
-                                if (all) {
-                                    // 启动BLE+WiFi P2P数据下载
-                                    startDataDownload()
-                                }
-                            }
-
-                            override fun onDenied(permissions: MutableList<String>, never: Boolean) {
-                                super.onDenied(permissions, never)
-                                if (never) {
-                                    XXPermissions.startPermissionActivity(this@MainActivity, permissions)
-                                }
-                            }
-                        })
-                    } else {
-                        // Android 12 及以下版本直接启动下载
-                        startDataDownload()
-                    }
-                }
+    private fun setupMainTabs() {
+        binding.viewPager.adapter = MainPagerAdapter(this)
+        com.google.android.material.tabs.TabLayoutMediator(binding.tabLayout, binding.viewPager) { tab, position ->
+            tab.text = when (position) {
+                0 -> "Devices"
+                1 -> "Controls"
+                else -> "Tab ${position + 1}"
             }
-        }
+        }.attach()
     }
 
-    private fun startDataDownload() {
+    fun startDataDownload() {
         Log.i("DataDownload", "Starting BLE+WiFi P2P data download...")
         
         // 检查蓝牙连接状态
@@ -442,14 +276,14 @@ class MainActivity : AppCompatActivity() {
                                             downloadMediaList(deviceIp)
                                         } else {
                                             Log.e("DataDownload", "Connection test failed, cannot reach device")
-                                            withContext(Dispatchers.Main) {
+                                            runOnUiThread {
                                                 showDownloadError("Cannot connect to glasses device. Please check P2P connection.")
                                             }
                                         }
                                     }
                                 } else {
                                     Log.e("DataDownload", "Failed to create P2P group")
-                                    withContext(Dispatchers.Main) {
+                                    runOnUiThread {
                                         showDownloadError("Failed to create P2P group")
                                     }
                                 }
@@ -524,12 +358,36 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun getDeviceIpFromBLE(): String? {
-        // 这里应该通过BLE特征值读取获取眼镜的IP地址
-        // 根据你的日志，眼镜会通过BLE上报IP地址
-        // 暂时返回一个示例IP，实际应该从BLE数据中解析
-        return "192.168.49.79"
+        val bleIp = bleIpBridge.ip.value
+        if (!bleIp.isNullOrBlank()) {
+            saveDeviceIpCache(bleIp)
+            return bleIp
+        }
+
+        val cachedIp = getDeviceIpCache()
+        if (!cachedIp.isNullOrBlank()) {
+            Log.i("MainActivity", "Using cached glass IP: $cachedIp")
+            return cachedIp
+        }
+
+        // Fall back to device manager or fixed default only if absolutely necessary
+        val fromDeviceManager = DeviceManager.getInstance().deviceAddress?.takeIf { it.isNotBlank() }
+        if (!fromDeviceManager.isNullOrBlank()) {
+            // Not an IP, but keep for fallback in case user wants to identify device
+            Log.i("MainActivity", "No BLE IP; using bound device address as fallback: $fromDeviceManager")
+        }
+
+        return null
     }
-    
+
+    private fun saveDeviceIpCache(ip: String) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putString(PREF_KEY_DEVICE_IP, ip).apply()
+    }
+
+    private fun getDeviceIpCache(): String? {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(PREF_KEY_DEVICE_IP, null)
+    }
+
     private fun downloadMediaList(deviceIp: String) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -614,14 +472,14 @@ class MainActivity : AppCompatActivity() {
                 downloadAllJpgFiles(jpgFiles)
             } else {
                 Log.w("DataDownload", "No JPG files found in media.config")
-                withContext(Dispatchers.Main) {
+                runOnUiThread {
                     showDownloadError("No JPG files found in media.config")
                 }
             }
             
         } catch (e: Exception) {
             Log.e("DataDownload", "Error parsing media list: ${e.message}", e)
-            withContext(Dispatchers.Main) {
+            runOnUiThread {
                 showDownloadError("Failed to parse media list: ${e.message}")
             }
         }
@@ -717,21 +575,51 @@ class MainActivity : AppCompatActivity() {
     
     private fun saveToAlbum(file: File, fileName: String) {
         try {
-            // 保存文件信息到相册数据库
-            val albumInfo = mapOf(
-                "fileName" to fileName,
-                "filePath" to file.absolutePath,
-                "fileDate" to "2025-08-18",
-                "fileType" to 1,
-                "timestamp" to System.currentTimeMillis(),
-                "mac" to "71:33:1D:2C:CF:A0"
-            )
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/GlassesDownloads")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
             
-            Log.i("DataDownload", "Album info: $albumInfo")
-            // TODO: 实现保存到相册数据库的逻辑
-            
+            val uri: Uri? = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            uri?.let { imageUri ->
+                contentResolver.openOutputStream(imageUri).use { out ->
+                    if (out != null) {
+                        file.inputStream().use { input -> input.copyTo(out) }
+                    }
+                }
+                contentValues.clear()
+                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                contentResolver.update(imageUri, contentValues, null, null)
+                Log.i("DataDownload", "Saved $fileName to gallery: $imageUri")
+            } ?: run {
+                Log.w("DataDownload", "Failed to insert media store entry for $fileName")
+            }
+
+            // Add fallback local manifest record for quick lookup
+            appendAlbumMetadata(fileName, file.absolutePath)
         } catch (e: Exception) {
             Log.e("DataDownload", "Error saving to album: ${e.message}", e)
+        }
+    }
+
+    private fun appendAlbumMetadata(fileName: String, filePath: String) {
+        try {
+            val metaFile = File(filesDir, "glasses_album.json")
+            val records = if (metaFile.exists()) {
+                metaFile.readText().takeIf { it.isNotBlank() } ?: "[]"
+            } else {
+                "[]"
+            }
+            
+            val sanitized = records.trim().removePrefix("[").removeSuffix("]").trim()
+            val newRecord = "{\"fileName\":\"${fileName}\",\"filePath\":\"${filePath}\",\"timestamp\":${System.currentTimeMillis()}}"
+            val combined = if (sanitized.isBlank()) "[$newRecord]" else "[$sanitized,$newRecord]"
+            metaFile.writeText(combined)
+            Log.i("DataDownload", "Album metadata appended: $fileName")
+        } catch (e: Exception) {
+            Log.e("DataDownload", "Failed to append album metadata: ${e.message}", e)
         }
     }
     
@@ -822,15 +710,18 @@ class MainActivity : AppCompatActivity() {
 
                 0x0c -> {
                     //眼镜触发暂停事件，语音播报
-                    if (response.loadData[7].toInt() == 1) {
-                        //to do
+                    if (response.loadData.size > 7 && response.loadData[7].toInt() == 1) {
+                        Log.i("MyDeviceNotifyListener", "Glasses requested pause event")
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Glasses paused an operation", Toast.LENGTH_SHORT).show() }
                     }
                 }
 
                 0x0d -> {
                     //解除APP绑定事件
-                    if (response.loadData[7].toInt() == 1) {
-                        //to do
+                    if (response.loadData.size > 7 && response.loadData[7].toInt() == 1) {
+                        Log.i("MyDeviceNotifyListener", "Glasses requested unbind")
+                        ConnectionManager.disconnect()
+                        runOnUiThread { Toast.makeText(this@MainActivity, "Device unbound by glasses", Toast.LENGTH_SHORT).show() }
                     }
                 }
                 //眼镜内存不足事件
@@ -872,6 +763,16 @@ class MainActivity : AppCompatActivity() {
 
                 }
             }
+        }
+    }
+
+    private fun setThemeByTime() {
+        try {
+            val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+            val mode = if (hour in 7..18) AppCompatDelegate.MODE_NIGHT_NO else AppCompatDelegate.MODE_NIGHT_YES
+            AppCompatDelegate.setDefaultNightMode(mode)
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to set theme by time", e)
         }
     }
 }

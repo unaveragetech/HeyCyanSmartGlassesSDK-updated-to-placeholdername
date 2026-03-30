@@ -1,10 +1,14 @@
 package com.sdk.glassessdksample.ui
+import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.le.ScanResult
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.*
 import android.util.Log
+import android.widget.Toast
+import androidx.core.app.ActivityCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.hjq.permissions.OnPermissionCallback
 import com.hjq.permissions.XXPermissions
@@ -27,7 +31,7 @@ class DeviceBindActivity : BaseActivity() {
     private var scanSize:Int=0
     private val runnable=MyRunnable()
 
-    private lateinit var loadingDialog: LoadingDialog
+    private var loadingDialog: LoadingDialog? = null
     private val myHandler : Handler = object : Handler(Looper.getMainLooper()){
         override fun handleMessage(msg: Message) {
             super.handleMessage(msg)
@@ -43,12 +47,40 @@ class DeviceBindActivity : BaseActivity() {
         binding= ActivityDeviceBindBinding.inflate(layoutInflater)
         EventBus.getDefault().register(this)
         setContentView(binding.root)
+        
+        // Add a reminder to the user
+        Toast.makeText(this, "Ensure devices are NOT connected to PC/other phones and are in pairing mode.", Toast.LENGTH_LONG).show()
     }
 
     override fun onResume() {
         super.onResume()
-        requestLocationPermission(this, PermissionCallback())
-        binding.startScan.performClick()
+        // Request Bluetooth permissions first, then scan
+        if (hasBluetooth(this)) {
+            startScanningFlow()
+        } else {
+            requestBluetoothPermission(this, object : OnPermissionCallback {
+                override fun onGranted(permissions: MutableList<String>, all: Boolean) {
+                    if (all) startScanningFlow()
+                }
+                override fun onDenied(permissions: MutableList<String>, never: Boolean) {
+                    if (never) XXPermissions.startPermissionActivity(this@DeviceBindActivity, permissions)
+                }
+            })
+        }
+    }
+
+    private fun startScanningFlow() {
+        if (BluetoothUtils.isEnabledBluetooth(this)) {
+            binding.startScan.performClick()
+        } else {
+            val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                    return
+                }
+            }
+            startActivityForResult(intent, 300)
+        }
     }
 
     private fun checkPermission(): Boolean {
@@ -61,11 +93,18 @@ class DeviceBindActivity : BaseActivity() {
 
     @Subscribe(threadMode = ThreadMode.MAIN)
     fun onMessageEvent(messageEvent: BluetoothEvent) {
-        Log.i(TAG, "onMessageEvent: "+messageEvent.connect)
-        if(messageEvent.connect){
-            loadingDialog.close()
+        Log.i(TAG, "onMessageEvent: " + messageEvent.connect)
+        if (messageEvent.connect) {
+            loadingDialog?.close()
             finish()
+        } else {
+            loadingDialog?.close()
+            showPairingFailedScreen()
         }
+    }
+
+    private fun showPairingFailedScreen() {
+        Toast.makeText(this, "Pairing failed. Ensure the glasses are in pairing mode.", Toast.LENGTH_LONG).show()
     }
 
     override fun setupViews() {
@@ -74,7 +113,7 @@ class DeviceBindActivity : BaseActivity() {
         binding.run {
             deviceRcv.layoutManager = LinearLayoutManager(this@DeviceBindActivity)
             deviceRcv.adapter = adapter
-            titleBar.tvTitle.text="扫描"
+            titleBar.tvTitle.text="Scan Devices"
             titleBar.ivNavigateBefore.setOnClickListener {
                 finish()
             }
@@ -88,19 +127,27 @@ class DeviceBindActivity : BaseActivity() {
                 val smartWatch:SmartWatch= deviceList[position]
                 BleOperateManager.getInstance().connectDirectly(smartWatch.deviceAddress)
 
-                loadingDialog =LoadingDialog(this@DeviceBindActivity)
-                loadingDialog.setLoadingText(getString(R.string.text_22))
-                    .show()
+                loadingDialog = LoadingDialog(this@DeviceBindActivity)
+                loadingDialog?.setLoadingText(getString(R.string.text_22))
+                    ?.show()
             }
         }
 
         setOnClickListener(binding.startScan) {
+            if (!hasBluetooth(this@DeviceBindActivity)) {
+                requestBluetoothPermission(this@DeviceBindActivity, object : OnPermissionCallback {
+                    override fun onGranted(p: MutableList<String>, all: Boolean) { if(all) binding.startScan.performClick() }
+                })
+                return@setOnClickListener
+            }
+
             deviceList.clear()
             adapter.notifyDataSetChanged()
             BleScannerHelper.getInstance().reSetCallback()
+            
             if(!BluetoothUtils.isEnabledBluetooth(this@DeviceBindActivity)){
                 val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-                activity!!.startActivityForResult(intent, 300)
+                startActivityForResult(intent, 300)
             }else{
                 scanSize = 0
                 BleScannerHelper.getInstance()
@@ -118,55 +165,31 @@ class DeviceBindActivity : BaseActivity() {
 
     }
 
-
-
     override fun onDestroy() {
         super.onDestroy()
         EventBus.getDefault().unregister(this)
     }
 
-
-
-    inner class PermissionCallback : OnPermissionCallback {
-        override fun onGranted(permissions: MutableList<String>, all: Boolean) {
-            if (!all) {
-
-            }
-        }
-
-        override fun onDenied(permissions: MutableList<String>, never: Boolean) {
-            super.onDenied(permissions, never)
-            if(never){
-                XXPermissions.startPermissionActivity(this@DeviceBindActivity, permissions);
-            }
-        }
-
-    }
-
-
     inner class BleCallback : ScanWrapperCallback {
         override fun onStart() {
+            Log.i("BleCallback", "Scan started")
         }
 
         override fun onStop() {
-
+            Log.i("BleCallback", "Scan stopped")
         }
 
         override fun onLeScan(device: BluetoothDevice?, rssi: Int, scanRecord: ByteArray?) {
             if (device != null && (!device.name.isNullOrEmpty())) {
-//                if (device.name.startsWith("O_")||device.name.startsWith("Q_")) {
-//
-//                }
-
                 val smartWatch = SmartWatch(device.name, device.address, rssi)
-                Log.i("1111",device.name+"---"+ device.address)
+                Log.i("BleCallback", "Found: ${device.name} - ${device.address}")
 
                 if (!deviceList.contains(smartWatch)) {
                     scanSize++
                     deviceList.add(0, smartWatch)
-                    deviceList.sortByDescending { it -> it.rssi }
+                    deviceList.sortByDescending { it.rssi }
                     adapter.notifyDataSetChanged()
-                    if (scanSize > 30) {
+                    if (scanSize > 50) {
                         BleScannerHelper.getInstance().stopScan(this@DeviceBindActivity)
                     }
                 }
@@ -174,16 +197,13 @@ class DeviceBindActivity : BaseActivity() {
         }
 
         override fun onScanFailed(errorCode: Int) {
-
+            Log.e("BleCallback", "Scan failed with code: $errorCode")
         }
 
         override fun onParsedData(device: BluetoothDevice?, scanRecord: ScanRecord?) {
-
         }
 
         override fun onBatchScanResults(results: MutableList<ScanResult>?) {
-
         }
-
     }
 }
